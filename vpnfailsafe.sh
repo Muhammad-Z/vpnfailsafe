@@ -52,30 +52,30 @@ update_routes() {
     local -ar remote_ips=("$cur_remote_ip" "${resolved_ips[@]}" "${cnf_remote_ips[@]}")
     if [[ "$*" == up ]]; then
         for remote_ip in "${remote_ips[@]}"; do
-            if [[ -n "$remote_ip" && -z "$(ip route show "$remote_ip")" ]]; then
-                ip route add "$remote_ip" via "$route_net_gateway"
+            if [[ -n "$remote_ip" && -z "$(/usr/sbin/ip route show "$remote_ip")" ]]; then
+                /usr/sbin/ip route add "$remote_ip" via "$route_net_gateway"
             fi
         done
         for net in 0.0.0.0/1 128.0.0.0/1; do
-            if [[ -z "$(ip route show "$net")" ]]; then
-                ip route add "$net" via "$route_vpn_gateway"
+            if [[ -z "$(/usr/sbin/ip route show "$net")" ]]; then
+                /usr/sbin/ip route add "$net" via "$route_vpn_gateway"
             fi
         done
         for i in $(seq 1 "${#route_networks[@]}"); do
-            if [[ -z "$(ip route show "${route_networks[i]}/${route_netmasks[i]}")" ]]; then
-                ip route add "${route_networks[i]}/${route_netmasks[i]}" \
+            if [[ -z "$(/usr/sbin/ip route show "${route_networks[i]}/${route_netmasks[i]}")" ]]; then
+                /usr/sbin/ip route add "${route_networks[i]}/${route_netmasks[i]}" \
                   via "${route_gateways[i]}" metric "${route_metrics[i]}" dev "$dev"
             fi
         done
     elif [[ "$*" == down ]]; then
         for route in "${remote_ips[@]}" 0.0.0.0/1 128.0.0.0/1; do
-            if [[ -n "$route" && -n "$(ip route show "$route")" ]]; then
-                ip route del "$route"
+            if [[ -n "$route" && -n "$(/usr/sbin/ip route show "$route")" ]]; then
+                /usr/sbin/ip route del "$route"
             fi
         done
         for i in $(seq 1 "${#route_networks[@]}"); do
-            if [[ -n "$(ip route show "${route_networks[i]}/${route_netmasks[i]}")" ]]; then
-                ip route del "${route_networks[i]}/${route_netmasks[i]}"
+            if [[ -n "$(/usr/sbin/ip route show "${route_networks[i]}/${route_netmasks[i]}")" ]]; then
+                /usr/sbin/ip route del "${route_networks[i]}/${route_netmasks[i]}"
             fi
         done
     fi
@@ -93,11 +93,11 @@ update_resolv() {
                 esac
             done
             if [[ -n "$ns" ]]; then
-                echo -e "${domains/ /search }\\n${ns// /$'\n'nameserver }"|resolvconf -xa "$dev"
+                echo -e "${domains/ /search }\\n${ns// /$'\n'nameserver }"|/usr/sbin/resolvconf -xa "$dev"
             else
                 echo "$0: WARNING: no DNS was pushed by the VPN server, this could cause a DNS leak" >&2
             fi;;
-        down) resolvconf -fd "$dev" 2>/dev/null || true;;
+        down) /usr/sbin/resolvconf -fd "$dev" 2>/dev/null || true;;
     esac
 }
 
@@ -105,14 +105,14 @@ update_resolv() {
 update_firewall() {
     # $@ := "INPUT" | "OUTPUT" | "FORWARD"
     insert_chain() {
-        if iptables -C "$*" -j "VPNFAILSAFE_$*" 2>/dev/null; then
-            iptables -D "$*" -j "VPNFAILSAFE_$*"
+        if /usr/sbin/iptables -C "$*" -j "VPNFAILSAFE_$*" 2>/dev/null; then
+            /usr/sbin/iptables -D "$*" -j "VPNFAILSAFE_$*"
             for opt in F X; do
-                iptables -"$opt" "VPNFAILSAFE_$*"
+                /usr/sbin/iptables -"$opt" "VPNFAILSAFE_$*"
             done
         fi
-        iptables -N "VPNFAILSAFE_$*"
-        iptables -I "$*" -j "VPNFAILSAFE_$*"
+        /usr/sbin/iptables -N "VPNFAILSAFE_$*"
+        /usr/sbin/iptables -I "$*" -j "VPNFAILSAFE_$*"
     }
 
     # $@ := "INPUT" | "OUTPUT"
@@ -121,22 +121,22 @@ update_firewall() {
             INPUT)  local -r icmp_type=reply   io=i sd=s states="";;
             OUTPUT) local -r icmp_type=request io=o sd=d states=NEW,;;
         esac
-        local -r public_nic="$(ip route show "$cur_remote_ip"|cut -d' ' -f5)"
+        local -r public_nic="$(/usr/sbin/ip route show "$cur_remote_ip"|cut -d' ' -f5)"
         local -ar suf=(-m conntrack --ctstate "$states"RELATED,ESTABLISHED -"$io" "${public_nic:?}" -j ACCEPT)
         icmp_rule() {
-            iptables "$1" "$2" -p icmp --icmp-type "echo-$icmp_type" -"$sd" "$3" "${suf[@]/%ACCEPT/RETURN}"
+            /usr/sbin/iptables "$1" "$2" -p icmp --icmp-type "echo-$icmp_type" -"$sd" "$3" "${suf[@]/%ACCEPT/RETURN}"
         }
         for ((i=1; i <= ${#remotes[*]}; ++i)); do
             local port="remote_port_$i"
             local proto="proto_$i"
-            iptables -A "VPNFAILSAFE_$*" -p "${!proto%-client}" -"$sd" "${remotes[i-1]}" --"$sd"port "${!port}" "${suf[@]}"
+            /usr/sbin/iptables -A "VPNFAILSAFE_$*" -p "${!proto%-client}" -"$sd" "${remotes[i-1]}" --"$sd"port "${!port}" "${suf[@]}"
             if ! icmp_rule -C "VPNFAILSAFE_$*" "${remotes[i-1]}" 2>/dev/null; then
                 icmp_rule -A "VPNFAILSAFE_$*" "${remotes[i-1]}"
             fi
         done
-        if ! iptables -S|grep -q "^-A VPNFAILSAFE_$* .*-$sd $cur_remote_ip/32 .*-j ACCEPT$"; then
+        if ! /usr/sbin/iptables -S|grep -q "^-A VPNFAILSAFE_$* .*-$sd $cur_remote_ip/32 .*-j ACCEPT$"; then
             for p in tcp udp; do
-                iptables -A "VPNFAILSAFE_$*" -p "$p" -"$sd" "$cur_remote_ip" --"$sd"port "${cur_port}" "${suf[@]}"
+                /usr/sbin/iptables -A "VPNFAILSAFE_$*" -p "$p" -"$sd" "$cur_remote_ip" --"$sd"port "${cur_port}" "${suf[@]}"
             done
             icmp_rule -A "VPNFAILSAFE_$*" "$cur_remote_ip"
         fi
@@ -145,7 +145,7 @@ update_firewall() {
     # $@ := "OUTPUT" | "FORWARD"
     reject_dns() {
         for proto in udp tcp; do
-            iptables -A "VPNFAILSAFE_$*" -p "$proto" --dport 53 ! -o "$dev" -j REJECT
+            /usr/sbin/iptables -A "VPNFAILSAFE_$*" -p "$proto" --dport 53 ! -o "$dev" -j REJECT
         done
     }
 
@@ -155,21 +155,21 @@ update_firewall() {
             INPUT) local -r io=i sd=s;;&
             OUTPUT|FORWARD) local -r io=o sd=d;;&
             INPUT) local -r vpn="${ifconfig_remote:-$ifconfig_local}/${ifconfig_netmask:-32}"
-               iptables -A "VPNFAILSAFE_$*" -"$sd" "$vpn" -"$io" "$dev" -j RETURN
+               /usr/sbin/iptables -A "VPNFAILSAFE_$*" -"$sd" "$vpn" -"$io" "$dev" -j RETURN
                for i in $(seq 1 "${#route_networks[@]}"); do
-                   iptables -A "VPNFAILSAFE_$*" -"$sd" "${route_networks[i]}/${route_netmasks[i]}" -"$io" "$dev" -j RETURN
+                   /usr/sbin/iptables -A "VPNFAILSAFE_$*" -"$sd" "${route_networks[i]}/${route_netmasks[i]}" -"$io" "$dev" -j RETURN
                done;;&
-            *) iptables -A "VPNFAILSAFE_$*" -"$sd" "$private_nets" ! -"$io" "$dev" -j RETURN;;&
-            INPUT) iptables -A "VPNFAILSAFE_$*" -s "$private_nets" -i "$dev" -j DROP;;&
+            *) /usr/sbin/iptables -A "VPNFAILSAFE_$*" -"$sd" "$private_nets" ! -"$io" "$dev" -j RETURN;;&
+            INPUT) /usr/sbin/iptables -A "VPNFAILSAFE_$*" -s "$private_nets" -i "$dev" -j DROP;;&
             *) for iface in "$dev" lo+; do
-                   iptables -A "VPNFAILSAFE_$*" -"$io" "$iface" -j RETURN
+                   /usr/sbin/iptables -A "VPNFAILSAFE_$*" -"$io" "$iface" -j RETURN
                done;;
         esac
     }
 
     # $@ := "INPUT" | "OUTPUT" | "FORWARD"
     drop_other() {
-        iptables -A "VPNFAILSAFE_$*" -j DROP
+        /usr/sbin/iptables -A "VPNFAILSAFE_$*" -j DROP
     }
 
     for chain in INPUT OUTPUT FORWARD; do
